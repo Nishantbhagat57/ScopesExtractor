@@ -1,15 +1,22 @@
 # frozen_string_literal: true
 
 require 'rotp'
-require 'cgi'
 
 module ScopesExtractor
   module Platforms
     module Bugcrowd
-      # Bugcrowd authenticator
+      # Bugcrowd authenticator (Okta-based flow)
       class Authenticator
         IDENTITY_URL = 'https://identity.bugcrowd.com'
+        OKTA_URL = 'https://login.hackers.bugcrowd.com'
         DASHBOARD_URL = 'https://bugcrowd.com/dashboard'
+
+        OKTA_HEADERS = {
+          'Accept' => 'application/json; okta-version=1.0.0',
+          'Content-Type' => 'application/json',
+          'X-Okta-User-Agent-Extended' => 'okta-auth-js/7.14.0 okta-signin-widget-7.43.1',
+          'Origin' => OKTA_URL
+        }.freeze
 
         def initialize(email:, password:, otp_secret:)
           @email = email
@@ -18,17 +25,12 @@ module ScopesExtractor
           @authenticated = false
         end
 
-        # Returns authentication status
-        # @return [Boolean] true if authenticated
         def authenticated?
           @authenticated
         end
 
-        # Performs authentication flow with Bugcrowd
-        # @return [Boolean] true if successful
         # rubocop:disable Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/MethodLength, Metrics/PerceivedComplexity
         def authenticate
-          # Validate credentials
           unless @email && @password && @otp_secret
             ScopesExtractor.logger.error '[Bugcrowd] Missing credentials (email, password, or OTP secret)'
             return false
@@ -36,103 +38,32 @@ module ScopesExtractor
 
           ScopesExtractor.logger.debug '[Bugcrowd] Starting authentication flow'
 
-          # Step 1: Get login page and extract CSRF token
-          login_url = "#{IDENTITY_URL}/login?user_hint=researcher&returnTo=/dashboard"
-          response = HTTP.get(login_url)
+          # Step 1: Get Okta login page and extract stateToken
+          state_token = fetch_state_token
+          return false unless state_token
 
-          unless response.success?
-            ScopesExtractor.logger.error "[Bugcrowd] Failed to fetch login page: #{response.code}"
-            return false
-          end
+          # Step 2: Introspect to get stateHandle
+          state_handle = introspect(state_token)
+          return false unless state_handle
 
-          csrf = extract_csrf(response)
-          unless csrf
-            ScopesExtractor.logger.error '[Bugcrowd] Failed to extract CSRF token'
-            return false
-          end
+          # Step 3: Identify (send email)
+          state_handle = identify(state_handle)
+          return false unless state_handle
 
-          ScopesExtractor.logger.debug "[Bugcrowd] CSRF token extracted: #{csrf[0..5]}..."
+          # Step 4: Password challenge
+          state_handle = challenge_answer(state_handle, @password, 'Password')
+          return false unless state_handle
 
-          # Step 2: Initial login POST (expects 422 for OTP challenge)
-          login_body = prepare_login_body(with_otp: false)
-          response = HTTP.post(
-            "#{IDENTITY_URL}/login",
-            body: login_body,
-            headers: {
-              'X-Csrf-Token' => csrf,
-              'Origin' => IDENTITY_URL,
-              'Referer' => login_url,
-              'Content-Type' => 'application/x-www-form-urlencoded'
-            }
-          )
+          # Step 5: OTP challenge — returns success redirect URL
+          otp_code = ROTP::TOTP.new(@otp_secret).now
+          success_url = otp_challenge(state_handle, otp_code)
+          return false unless success_url
 
-          unless response.code == 422
-            ScopesExtractor.logger.error "[Bugcrowd] Login failed: #{response.code}"
-            return false
-          end
+          # Step 6: Follow token/redirect to establish session (Typhoeus follows 183/184 automatically)
+          HTTP.get(success_url)
 
-          ScopesExtractor.logger.debug '[Bugcrowd] OTP challenge triggered'
-
-          # Step 3: OTP challenge
-          otp_body = prepare_login_body(with_otp: true)
-          response = HTTP.post(
-            "#{IDENTITY_URL}/auth/otp-challenge",
-            body: otp_body,
-            headers: {
-              'X-Csrf-Token' => csrf,
-              'Origin' => IDENTITY_URL,
-              'Referer' => "#{IDENTITY_URL}/login",
-              'Content-Type' => 'application/x-www-form-urlencoded'
-            }
-          )
-
-          unless response.success?
-            ScopesExtractor.logger.error "[Bugcrowd] OTP challenge failed: #{response.code}"
-            return false
-          end
-
-          data = JSON.parse(response.body)
-          redirect_url = data['redirect_to']
-
-          ScopesExtractor.logger.debug "[Bugcrowd] Following redirect to: #{redirect_url}"
-
-          # Step 4: Follow redirects to establish session
-          current_url = redirect_url
-          max_redirects = 10
-          redirect_count = 0
-
-          loop do
-            break if redirect_count >= max_redirects
-
-            response = HTTP.get(current_url)
-            break unless [301, 302, 303, 307, 308].include?(response.code)
-
-            location = response.headers['Location']
-            break unless location
-
-            # Handle relative URLs
-            current_url = if location.start_with?('http')
-                            location
-                          else
-                            # Assume same domain
-                            "https://bugcrowd.com#{location}"
-                          end
-
-            ScopesExtractor.logger.debug "[Bugcrowd] Redirect to: #{current_url}"
-            redirect_count += 1
-          end
-
-          # Step 5: Verify authentication by checking dashboard
-          response = HTTP.get(DASHBOARD_URL)
-
-          if authenticated_response?(response)
-            ScopesExtractor.logger.debug '[Bugcrowd] Authentication successful'
-            @authenticated = true
-            true
-          else
-            ScopesExtractor.logger.error '[Bugcrowd] Authentication verification failed'
-            false
-          end
+          # Step 7: Verify authentication
+          establish_session
         rescue StandardError => e
           ScopesExtractor.logger.error "[Bugcrowd] Authentication error: #{e.message}"
           false
@@ -141,35 +72,120 @@ module ScopesExtractor
 
         private
 
-        def extract_csrf(response)
-          set_cookie = response.headers['Set-Cookie']
-          return nil unless set_cookie
+        def fetch_state_token
+          response = HTTP.get("#{IDENTITY_URL}/login/hacker/oauth2/authorization/hacker")
 
-          # set-cookie can be an array or string
-          cookies = set_cookie.is_a?(Array) ? set_cookie : [set_cookie]
-
-          cookies.each do |cookie_str|
-            match = cookie_str.match(/csrf-token=([^;]+)/)
-            return match[1] if match
+          unless response.success?
+            ScopesExtractor.logger.error "[Bugcrowd] Failed to fetch Okta login page: #{response.code}"
+            return nil
           end
 
-          nil
-        end
-
-        def prepare_login_body(with_otp:)
-          body = "username=#{CGI.escape(@email)}&password=#{CGI.escape(@password)}&user_type=RESEARCHER"
-
-          if with_otp
-            otp_code = ROTP::TOTP.new(@otp_secret).now
-            body += "&otp_code=#{otp_code}"
+          match = response.body.match(/"stateToken"\s*:\s*"([^"]+)"/)
+          unless match
+            ScopesExtractor.logger.error '[Bugcrowd] Failed to extract stateToken'
+            return nil
           end
 
-          body
+          # Unescape JS hex sequences (e.g. \x2D -> -)
+          token = match[1].gsub(/\\x([0-9A-Fa-f]{2})/) { [$1.hex].pack('C') }
+          ScopesExtractor.logger.debug '[Bugcrowd] stateToken extracted'
+          token
         end
 
-        def authenticated_response?(response)
-          response.body.include?('<title>Dashboard - Bugcrowd') ||
-            response.headers['Location'] == '/dashboard'
+        def introspect(state_token)
+          response = HTTP.post(
+            "#{OKTA_URL}/idp/idx/introspect",
+            body: { stateToken: state_token }.to_json,
+            headers: OKTA_HEADERS.merge(
+              'Accept' => 'application/ion+json; okta-version=1.0.0',
+              'Content-Type' => 'application/ion+json; okta-version=1.0.0'
+            )
+          )
+
+          unless response.success?
+            ScopesExtractor.logger.error "[Bugcrowd] Introspect failed: #{response.code}"
+            return nil
+          end
+
+          data = JSON.parse(response.body)
+          state_handle = data['stateHandle']
+          unless state_handle
+            ScopesExtractor.logger.error '[Bugcrowd] No stateHandle in introspect response'
+            return nil
+          end
+
+          ScopesExtractor.logger.debug '[Bugcrowd] stateHandle obtained'
+          state_handle
+        end
+
+        def identify(state_handle)
+          response = HTTP.post(
+            "#{OKTA_URL}/idp/idx/identify",
+            body: { identifier: @email, stateHandle: state_handle }.to_json,
+            headers: OKTA_HEADERS
+          )
+
+          unless response.success?
+            ScopesExtractor.logger.error "[Bugcrowd] Identify failed: #{response.code}"
+            return nil
+          end
+
+          data = JSON.parse(response.body)
+          ScopesExtractor.logger.debug '[Bugcrowd] Identify successful'
+          data['stateHandle'] || state_handle
+        end
+
+        def challenge_answer(state_handle, passcode, step_name)
+          response = HTTP.post(
+            "#{OKTA_URL}/idp/idx/challenge/answer",
+            body: { credentials: { passcode: passcode }, stateHandle: state_handle }.to_json,
+            headers: OKTA_HEADERS
+          )
+
+          unless response.success?
+            ScopesExtractor.logger.error "[Bugcrowd] #{step_name} challenge failed: #{response.code}"
+            return nil
+          end
+
+          data = JSON.parse(response.body)
+          ScopesExtractor.logger.debug "[Bugcrowd] #{step_name} challenge successful"
+          data['stateHandle'] || state_handle
+        end
+
+        def otp_challenge(state_handle, otp_code)
+          response = HTTP.post(
+            "#{OKTA_URL}/idp/idx/challenge/answer",
+            body: { credentials: { passcode: otp_code }, stateHandle: state_handle }.to_json,
+            headers: OKTA_HEADERS
+          )
+
+          unless response.success?
+            ScopesExtractor.logger.error "[Bugcrowd] OTP challenge failed: #{response.code}"
+            return nil
+          end
+
+          data = JSON.parse(response.body)
+          success_url = data.dig('success', 'href')
+          unless success_url
+            ScopesExtractor.logger.error '[Bugcrowd] No success redirect URL in OTP response'
+            return nil
+          end
+
+          ScopesExtractor.logger.debug '[Bugcrowd] OTP challenge successful'
+          success_url
+        end
+
+        def establish_session
+          response = HTTP.get(DASHBOARD_URL)
+
+          if response.success? && response.body.include?('dashboard')
+            ScopesExtractor.logger.debug '[Bugcrowd] Authentication successful'
+            @authenticated = true
+            true
+          else
+            ScopesExtractor.logger.error '[Bugcrowd] Authentication verification failed'
+            false
+          end
         end
       end
     end

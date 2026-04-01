@@ -8,6 +8,15 @@ RSpec.describe ScopesExtractor::Platforms::Bugcrowd::Authenticator do
   let(:otp_secret) { 'BASE32SECRET' }
   let(:authenticator) { described_class.new(email: email, password: password, otp_secret: otp_secret) }
 
+  let(:state_token) { 'eyJ6aXAiOiJERUYi.test_state_token' }
+  let(:state_handle) { '02.id.test_state_handle' }
+  let(:updated_state_handle) { '02.id.updated_state_handle' }
+  let(:success_redirect_url) { 'https://login.hackers.bugcrowd.com/login/token/redirect?stateToken=02.id.test_state_handle' }
+
+  let(:okta_login_page_body) do
+    "<html><script>var oktaData = {\"stateToken\":\"#{state_token}\"};</script></html>"
+  end
+
   describe '#initialize' do
     it 'sets email' do
       expect(authenticator.instance_variable_get(:@email)).to eq(email)
@@ -25,26 +34,28 @@ RSpec.describe ScopesExtractor::Platforms::Bugcrowd::Authenticator do
   end
 
   describe '#authenticate' do
-    let(:login_page_response) do
-      double('Response',
-             success?: true,
-             code: 200,
-             headers: { 'Set-Cookie' => 'csrf-token=test_csrf_token; Path=/' },
-             body: '<html></html>')
+    let(:okta_page_response) do
+      double('Response', success?: true, code: 200, body: okta_login_page_body)
     end
-    let(:login_response) { double('Response', success?: false, code: 422) }
-    let(:otp_response) do
-      double('Response',
-             success?: true,
-             code: 200,
-             body: { redirect_to: 'https://bugcrowd.com/auth/callback' }.to_json)
+    let(:introspect_response) do
+      double('Response', success?: true, code: 200, body: { stateHandle: state_handle }.to_json)
     end
-    let(:redirect_response) { double('Response', success?: true, code: 200, headers: {}) }
+    let(:identify_response) do
+      double('Response', success?: true, code: 200, body: { stateHandle: updated_state_handle }.to_json)
+    end
+    let(:password_challenge_response) do
+      double('Response', success?: true, code: 200, body: { stateHandle: updated_state_handle }.to_json)
+    end
+    let(:otp_challenge_response) do
+      double('Response', success?: true, code: 200,
+             body: { stateHandle: updated_state_handle,
+                     success: { name: 'success-redirect', href: success_redirect_url } }.to_json)
+    end
+    let(:token_redirect_response) do
+      double('Response', success?: true, code: 200, body: '')
+    end
     let(:dashboard_response) do
-      double('Response',
-             success?: true,
-             code: 200,
-             body: '<html><title>Dashboard - Bugcrowd</title></html>')
+      double('Response', success?: true, code: 200, body: '<html>dashboard</html>')
     end
 
     context 'when credentials are missing' do
@@ -82,17 +93,20 @@ RSpec.describe ScopesExtractor::Platforms::Bugcrowd::Authenticator do
     context 'when authentication flow succeeds' do
       before do
         allow(ScopesExtractor::HTTP).to receive(:get)
-          .with(include('identity.bugcrowd.com/login'))
-          .and_return(login_page_response)
+          .with(include('oauth2/authorization/hacker'))
+          .and_return(okta_page_response)
         allow(ScopesExtractor::HTTP).to receive(:post)
-          .with(include('identity.bugcrowd.com/login'), any_args)
-          .and_return(login_response)
+          .with(include('/idp/idx/introspect'), any_args)
+          .and_return(introspect_response)
         allow(ScopesExtractor::HTTP).to receive(:post)
-          .with(include('otp-challenge'), any_args)
-          .and_return(otp_response)
+          .with(include('/idp/idx/identify'), any_args)
+          .and_return(identify_response)
+        allow(ScopesExtractor::HTTP).to receive(:post)
+          .with(include('/idp/idx/challenge/answer'), any_args)
+          .and_return(password_challenge_response, otp_challenge_response)
         allow(ScopesExtractor::HTTP).to receive(:get)
-          .with('https://bugcrowd.com/auth/callback')
-          .and_return(redirect_response)
+          .with(success_redirect_url)
+          .and_return(token_redirect_response)
         allow(ScopesExtractor::HTTP).to receive(:get)
           .with('https://bugcrowd.com/dashboard')
           .and_return(dashboard_response)
@@ -109,18 +123,20 @@ RSpec.describe ScopesExtractor::Platforms::Bugcrowd::Authenticator do
 
       it 'logs debug messages' do
         expect(ScopesExtractor.logger).to receive(:debug).with('[Bugcrowd] Starting authentication flow')
-        expect(ScopesExtractor.logger).to receive(:debug).with(/CSRF token extracted/)
-        expect(ScopesExtractor.logger).to receive(:debug).with('[Bugcrowd] OTP challenge triggered')
-        expect(ScopesExtractor.logger).to receive(:debug).with(/Following redirect to/)
+        expect(ScopesExtractor.logger).to receive(:debug).with('[Bugcrowd] stateToken extracted')
+        expect(ScopesExtractor.logger).to receive(:debug).with('[Bugcrowd] stateHandle obtained')
+        expect(ScopesExtractor.logger).to receive(:debug).with('[Bugcrowd] Identify successful')
+        expect(ScopesExtractor.logger).to receive(:debug).with('[Bugcrowd] Password challenge successful')
+        expect(ScopesExtractor.logger).to receive(:debug).with('[Bugcrowd] OTP challenge successful')
         expect(ScopesExtractor.logger).to receive(:debug).with('[Bugcrowd] Authentication successful')
         authenticator.authenticate
       end
     end
 
-    context 'when login page fetch fails' do
+    context 'when Okta login page fetch fails' do
       before do
         allow(ScopesExtractor::HTTP).to receive(:get)
-          .with(include('identity.bugcrowd.com/login'))
+          .with(include('oauth2/authorization/hacker'))
           .and_return(double('Response', success?: false, code: 500))
       end
 
@@ -129,16 +145,16 @@ RSpec.describe ScopesExtractor::Platforms::Bugcrowd::Authenticator do
       end
 
       it 'logs error message' do
-        expect(ScopesExtractor.logger).to receive(:error).with(/Failed to fetch login page/)
+        expect(ScopesExtractor.logger).to receive(:error).with(/Failed to fetch Okta login page/)
         authenticator.authenticate
       end
     end
 
-    context 'when CSRF token extraction fails' do
+    context 'when stateToken extraction fails' do
       before do
         allow(ScopesExtractor::HTTP).to receive(:get)
-          .with(include('identity.bugcrowd.com/login'))
-          .and_return(double('Response', success?: true, code: 200, headers: {}, body: ''))
+          .with(include('oauth2/authorization/hacker'))
+          .and_return(double('Response', success?: true, code: 200, body: '<html>no token here</html>'))
       end
 
       it 'returns false' do
@@ -146,18 +162,41 @@ RSpec.describe ScopesExtractor::Platforms::Bugcrowd::Authenticator do
       end
 
       it 'logs error message' do
-        expect(ScopesExtractor.logger).to receive(:error).with('[Bugcrowd] Failed to extract CSRF token')
+        expect(ScopesExtractor.logger).to receive(:error).with('[Bugcrowd] Failed to extract stateToken')
         authenticator.authenticate
       end
     end
 
-    context 'when initial login fails' do
+    context 'when introspect fails' do
       before do
         allow(ScopesExtractor::HTTP).to receive(:get)
-          .with(include('identity.bugcrowd.com/login'))
-          .and_return(login_page_response)
+          .with(include('oauth2/authorization/hacker'))
+          .and_return(okta_page_response)
         allow(ScopesExtractor::HTTP).to receive(:post)
-          .with(include('identity.bugcrowd.com/login'), any_args)
+          .with(include('/idp/idx/introspect'), any_args)
+          .and_return(double('Response', success?: false, code: 400))
+      end
+
+      it 'returns false' do
+        expect(authenticator.authenticate).to be false
+      end
+
+      it 'logs error message' do
+        expect(ScopesExtractor.logger).to receive(:error).with(/Introspect failed: 400/)
+        authenticator.authenticate
+      end
+    end
+
+    context 'when identify fails' do
+      before do
+        allow(ScopesExtractor::HTTP).to receive(:get)
+          .with(include('oauth2/authorization/hacker'))
+          .and_return(okta_page_response)
+        allow(ScopesExtractor::HTTP).to receive(:post)
+          .with(include('/idp/idx/introspect'), any_args)
+          .and_return(introspect_response)
+        allow(ScopesExtractor::HTTP).to receive(:post)
+          .with(include('/idp/idx/identify'), any_args)
           .and_return(double('Response', success?: false, code: 401))
       end
 
@@ -166,7 +205,33 @@ RSpec.describe ScopesExtractor::Platforms::Bugcrowd::Authenticator do
       end
 
       it 'logs error message' do
-        expect(ScopesExtractor.logger).to receive(:error).with(/Login failed: 401/)
+        expect(ScopesExtractor.logger).to receive(:error).with(/Identify failed: 401/)
+        authenticator.authenticate
+      end
+    end
+
+    context 'when password challenge fails' do
+      before do
+        allow(ScopesExtractor::HTTP).to receive(:get)
+          .with(include('oauth2/authorization/hacker'))
+          .and_return(okta_page_response)
+        allow(ScopesExtractor::HTTP).to receive(:post)
+          .with(include('/idp/idx/introspect'), any_args)
+          .and_return(introspect_response)
+        allow(ScopesExtractor::HTTP).to receive(:post)
+          .with(include('/idp/idx/identify'), any_args)
+          .and_return(identify_response)
+        allow(ScopesExtractor::HTTP).to receive(:post)
+          .with(include('/idp/idx/challenge/answer'), any_args)
+          .and_return(double('Response', success?: false, code: 401))
+      end
+
+      it 'returns false' do
+        expect(authenticator.authenticate).to be false
+      end
+
+      it 'logs error message' do
+        expect(ScopesExtractor.logger).to receive(:error).with(/Password challenge failed: 401/)
         authenticator.authenticate
       end
     end
@@ -174,14 +239,20 @@ RSpec.describe ScopesExtractor::Platforms::Bugcrowd::Authenticator do
     context 'when OTP challenge fails' do
       before do
         allow(ScopesExtractor::HTTP).to receive(:get)
-          .with(include('identity.bugcrowd.com/login'))
-          .and_return(login_page_response)
+          .with(include('oauth2/authorization/hacker'))
+          .and_return(okta_page_response)
         allow(ScopesExtractor::HTTP).to receive(:post)
-          .with(include('identity.bugcrowd.com/login'), any_args)
-          .and_return(login_response)
+          .with(include('/idp/idx/introspect'), any_args)
+          .and_return(introspect_response)
         allow(ScopesExtractor::HTTP).to receive(:post)
-          .with(include('otp-challenge'), any_args)
-          .and_return(double('Response', success?: false, code: 401))
+          .with(include('/idp/idx/identify'), any_args)
+          .and_return(identify_response)
+        allow(ScopesExtractor::HTTP).to receive(:post)
+          .with(include('/idp/idx/challenge/answer'), any_args)
+          .and_return(
+            password_challenge_response,
+            double('Response', success?: false, code: 401)
+          )
       end
 
       it 'returns false' do
@@ -189,7 +260,7 @@ RSpec.describe ScopesExtractor::Platforms::Bugcrowd::Authenticator do
       end
 
       it 'logs error message' do
-        expect(ScopesExtractor.logger).to receive(:error).with(/OTP challenge failed/)
+        expect(ScopesExtractor.logger).to receive(:error).with(/OTP challenge failed: 401/)
         authenticator.authenticate
       end
     end
@@ -197,20 +268,23 @@ RSpec.describe ScopesExtractor::Platforms::Bugcrowd::Authenticator do
     context 'when dashboard verification fails' do
       before do
         allow(ScopesExtractor::HTTP).to receive(:get)
-          .with(include('identity.bugcrowd.com/login'))
-          .and_return(login_page_response)
+          .with(include('oauth2/authorization/hacker'))
+          .and_return(okta_page_response)
         allow(ScopesExtractor::HTTP).to receive(:post)
-          .with(include('identity.bugcrowd.com/login'), any_args)
-          .and_return(login_response)
+          .with(include('/idp/idx/introspect'), any_args)
+          .and_return(introspect_response)
         allow(ScopesExtractor::HTTP).to receive(:post)
-          .with(include('otp-challenge'), any_args)
-          .and_return(otp_response)
+          .with(include('/idp/idx/identify'), any_args)
+          .and_return(identify_response)
+        allow(ScopesExtractor::HTTP).to receive(:post)
+          .with(include('/idp/idx/challenge/answer'), any_args)
+          .and_return(password_challenge_response, otp_challenge_response)
         allow(ScopesExtractor::HTTP).to receive(:get)
-          .with('https://bugcrowd.com/auth/callback')
-          .and_return(redirect_response)
+          .with(success_redirect_url)
+          .and_return(token_redirect_response)
         allow(ScopesExtractor::HTTP).to receive(:get)
           .with('https://bugcrowd.com/dashboard')
-          .and_return(double('Response', success?: true, code: 200, body: '<html>Not logged in</html>', headers: {}))
+          .and_return(double('Response', success?: true, code: 200, body: '<html>Not logged in</html>'))
       end
 
       it 'returns false' do
@@ -226,7 +300,7 @@ RSpec.describe ScopesExtractor::Platforms::Bugcrowd::Authenticator do
     context 'when an exception occurs' do
       before do
         allow(ScopesExtractor::HTTP).to receive(:get)
-          .with(include('identity.bugcrowd.com/login'))
+          .with(include('oauth2/authorization/hacker'))
           .and_raise(StandardError, 'Network error')
       end
 
@@ -240,76 +314,36 @@ RSpec.describe ScopesExtractor::Platforms::Bugcrowd::Authenticator do
       end
     end
 
-    context 'with redirects' do
-      let(:redirect_302_response) do
-        double('Response',
-               success?: false,
-               code: 302,
-               headers: { 'Location' => '/dashboard' })
+    context 'with hex-escaped stateToken' do
+      let(:okta_login_page_body) do
+        '<html><script>var oktaData = {"stateToken":"abc\\x2Ddef\\x2Dghi"};</script></html>'
       end
 
       before do
         allow(ScopesExtractor::HTTP).to receive(:get)
-          .with(include('identity.bugcrowd.com/login'))
-          .and_return(login_page_response)
+          .with(include('oauth2/authorization/hacker'))
+          .and_return(okta_page_response)
         allow(ScopesExtractor::HTTP).to receive(:post)
-          .with(include('identity.bugcrowd.com/login'), any_args)
-          .and_return(login_response)
+          .with(include('/idp/idx/introspect'), any_args) do |_url, **kwargs|
+            body = JSON.parse(kwargs[:body])
+            expect(body['stateToken']).to eq('abc-def-ghi')
+            introspect_response
+          end
         allow(ScopesExtractor::HTTP).to receive(:post)
-          .with(include('otp-challenge'), any_args)
-          .and_return(otp_response)
+          .with(include('/idp/idx/identify'), any_args)
+          .and_return(identify_response)
+        allow(ScopesExtractor::HTTP).to receive(:post)
+          .with(include('/idp/idx/challenge/answer'), any_args)
+          .and_return(password_challenge_response, otp_challenge_response)
         allow(ScopesExtractor::HTTP).to receive(:get)
-          .with('https://bugcrowd.com/auth/callback')
-          .and_return(redirect_302_response)
+          .with(success_redirect_url)
+          .and_return(token_redirect_response)
         allow(ScopesExtractor::HTTP).to receive(:get)
           .with('https://bugcrowd.com/dashboard')
           .and_return(dashboard_response)
       end
 
-      it 'follows redirects' do
-        expect(ScopesExtractor::HTTP).to receive(:get).with('https://bugcrowd.com/dashboard')
-        authenticator.authenticate
-      end
-
-      it 'handles relative URLs' do
-        expect(ScopesExtractor.logger).to receive(:debug).with('[Bugcrowd] Starting authentication flow')
-        expect(ScopesExtractor.logger).to receive(:debug).with(/CSRF token extracted/)
-        expect(ScopesExtractor.logger).to receive(:debug).with('[Bugcrowd] OTP challenge triggered')
-        expect(ScopesExtractor.logger).to receive(:debug).with(/Following redirect to/)
-        expect(ScopesExtractor.logger).to receive(:debug).with(%r{Redirect to: https://bugcrowd.com/dashboard})
-        expect(ScopesExtractor.logger).to receive(:debug).with('[Bugcrowd] Authentication successful')
-        authenticator.authenticate
-      end
-    end
-
-    context 'with Set-Cookie as array' do
-      let(:login_page_response) do
-        double('Response',
-               success?: true,
-               code: 200,
-               headers: { 'Set-Cookie' => ['other=value; Path=/', 'csrf-token=array_csrf; Path=/'] },
-               body: '<html></html>')
-      end
-
-      before do
-        allow(ScopesExtractor::HTTP).to receive(:get)
-          .with(include('identity.bugcrowd.com/login'))
-          .and_return(login_page_response)
-        allow(ScopesExtractor::HTTP).to receive(:post)
-          .with(include('identity.bugcrowd.com/login'), any_args)
-          .and_return(login_response)
-        allow(ScopesExtractor::HTTP).to receive(:post)
-          .with(include('otp-challenge'), any_args)
-          .and_return(otp_response)
-        allow(ScopesExtractor::HTTP).to receive(:get)
-          .with('https://bugcrowd.com/auth/callback')
-          .and_return(redirect_response)
-        allow(ScopesExtractor::HTTP).to receive(:get)
-          .with('https://bugcrowd.com/dashboard')
-          .and_return(dashboard_response)
-      end
-
-      it 'extracts CSRF from cookie array' do
+      it 'unescapes hex sequences in stateToken' do
         expect(authenticator.authenticate).to be true
       end
     end
