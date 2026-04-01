@@ -1,5 +1,21 @@
 # Changelog
 
+## Version 2.0.1 - Bugcrowd Auth Fix
+
+### 🐛 Bug Fixes
+
+#### Migrated Bugcrowd Authentication to Okta-Based Flow
+
+Bugcrowd has migrated its authentication system to Okta. The previous CSRF-based login flow no longer works.
+
+**Changes:**
+- **New Okta flow**: Authentication now goes through `login.hackers.bugcrowd.com` using Okta's IDX API
+- **Multi-step authentication**: Implements the full Okta pipeline — `stateToken` extraction, introspect, identify, password challenge, and OTP challenge
+- **Removed legacy code**: Dropped CSRF token extraction, `CGI`-based form encoding, manual redirect following, and the old `prepare_login_body` / `extract_csrf` / `authenticated_response?` helpers
+- **Simplified session verification**: Dashboard check now uses a simple body content match
+
+---
+
 ## Version 2.0.0 - Complete Refactor
 
 ### 🚨 BREAKING CHANGES
