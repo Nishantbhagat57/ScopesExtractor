@@ -29,7 +29,6 @@ module ScopesExtractor
           @authenticated
         end
 
-        # rubocop:disable Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/MethodLength, Metrics/PerceivedComplexity
         def authenticate
           unless @email && @password && @otp_secret
             ScopesExtractor.logger.error '[Bugcrowd] Missing credentials (email, password, or OTP secret)'
@@ -68,7 +67,6 @@ module ScopesExtractor
           ScopesExtractor.logger.error "[Bugcrowd] Authentication error: #{e.message}"
           false
         end
-        # rubocop:enable Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/MethodLength, Metrics/PerceivedComplexity
 
         private
 
@@ -87,7 +85,7 @@ module ScopesExtractor
           end
 
           # Unescape JS hex sequences (e.g. \x2D -> -)
-          token = match[1].gsub(/\\x([0-9A-Fa-f]{2})/) { [$1.hex].pack('C') }
+          token = match[1].gsub(/\\x([0-9A-Fa-f]{2})/) { [::Regexp.last_match(1).hex].pack('C') }
           ScopesExtractor.logger.debug '[Bugcrowd] stateToken extracted'
           token
         end

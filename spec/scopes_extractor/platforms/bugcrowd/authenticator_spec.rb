@@ -48,8 +48,8 @@ RSpec.describe ScopesExtractor::Platforms::Bugcrowd::Authenticator do
     end
     let(:otp_challenge_response) do
       double('Response', success?: true, code: 200,
-             body: { stateHandle: updated_state_handle,
-                     success: { name: 'success-redirect', href: success_redirect_url } }.to_json)
+                         body: { stateHandle: updated_state_handle,
+                                 success: { name: 'success-redirect', href: success_redirect_url } }.to_json)
     end
     let(:token_redirect_response) do
       double('Response', success?: true, code: 200, body: '')
