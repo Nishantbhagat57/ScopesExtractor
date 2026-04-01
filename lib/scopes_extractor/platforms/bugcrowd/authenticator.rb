@@ -173,7 +173,7 @@ module ScopesExtractor
           success_url
         end
 
-        def establish_session
+        def establish_session # rubocop:disable Naming/PredicateMethod
           response = HTTP.get(DASHBOARD_URL)
 
           if response.success? && response.body.include?('dashboard')

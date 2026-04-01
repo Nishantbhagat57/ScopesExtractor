@@ -2,6 +2,7 @@
 
 require 'spec_helper'
 
+# rubocop:disable RSpec/MultipleMemoizedHelpers
 RSpec.describe ScopesExtractor::Platforms::Bugcrowd::Authenticator do
   let(:email) { 'test@example.com' }
   let(:password) { 'test_password' }
@@ -324,11 +325,8 @@ RSpec.describe ScopesExtractor::Platforms::Bugcrowd::Authenticator do
           .with(include('oauth2/authorization/hacker'))
           .and_return(okta_page_response)
         allow(ScopesExtractor::HTTP).to receive(:post)
-          .with(include('/idp/idx/introspect'), any_args) do |_url, **kwargs|
-            body = JSON.parse(kwargs[:body])
-            expect(body['stateToken']).to eq('abc-def-ghi')
-            introspect_response
-          end
+          .with(include('/idp/idx/introspect'), any_args)
+          .and_return(introspect_response)
         allow(ScopesExtractor::HTTP).to receive(:post)
           .with(include('/idp/idx/identify'), any_args)
           .and_return(identify_response)
@@ -345,7 +343,10 @@ RSpec.describe ScopesExtractor::Platforms::Bugcrowd::Authenticator do
 
       it 'unescapes hex sequences in stateToken' do
         expect(authenticator.authenticate).to be true
+        expect(ScopesExtractor::HTTP).to have_received(:post)
+          .with(include('/idp/idx/introspect'), hash_including(body: include('"stateToken":"abc-def-ghi"')))
       end
     end
   end
 end
+# rubocop:enable RSpec/MultipleMemoizedHelpers
