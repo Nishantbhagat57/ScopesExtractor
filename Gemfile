@@ -12,7 +12,7 @@ gem 'dry-struct', '~> 1.8'           # Type-safe models
 gem 'dry-types', '~> 1.9'            # Type system
 gem 'logger', '~> 1.7'               # Logging
 gem 'public_suffix', '~> 7.0'        # Public suffix list for domain validation
-gem 'puma', '~> 7.1'                 # REST API
+gem 'puma', '~> 7.2'                 # REST API
 gem 'rack', '~> 3.2'                 # REST API
 gem 'rackup', '~> 2.3'               # REST API
 gem 'sequel', '~> 5.100'             # Database ORM
