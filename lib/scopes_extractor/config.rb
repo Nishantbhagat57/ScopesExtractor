@@ -40,6 +40,21 @@ module ScopesExtractor
         http[:timeout] || 30
       end
 
+      # Maximum number of retries on retryable HTTP responses (429/5xx).
+      def http_retry_max_attempts
+        http[:retry_max_attempts] || 5
+      end
+
+      # Base delay (seconds) for exponential backoff: base * 2**attempt.
+      def http_retry_base_delay
+        http[:retry_base_delay] || 3
+      end
+
+      # Cap (seconds) on a single retry wait. Covers HackerOne's ~60s window.
+      def http_retry_max_delay
+        http[:retry_max_delay] || 70
+      end
+
       def api
         load[:api] || {}
       end

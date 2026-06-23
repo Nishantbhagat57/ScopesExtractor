@@ -5,6 +5,10 @@ require 'tempfile'
 
 module ScopesExtractor
   module HTTP
+    # HTTP status codes that are worth retrying with backoff.
+    # 429 = rate limited, 5xx = transient server-side errors.
+    RETRYABLE_CODES = [429, 500, 502, 503, 504].freeze
+
     class << self
       attr_reader :hydra, :cookie_file
 
@@ -35,15 +39,64 @@ module ScopesExtractor
         request(:post, url, body: body, headers: headers, timeout: timeout)
       end
 
+      def retryable?(response)
+        RETRYABLE_CODES.include?(response.code)
+      end
+
+      # Computes how long to wait before the next retry.
+      # Honours a server-provided Retry-After header when present, otherwise
+      # falls back to capped exponential backoff with positive jitter.
+      # The jitter desynchronizes clients sharing the same token/IP, which is
+      # the main cause of repeated 429s when several tools run concurrently.
+      # @return [Float] delay in seconds
+      def retry_delay(response, attempt)
+        retry_after = parse_retry_after(response)
+        return retry_after if retry_after
+
+        base = Config.http_retry_base_delay.to_f
+        cap = Config.http_retry_max_delay.to_f
+
+        backoff = [base * (2**attempt), cap].min
+        [backoff + (rand * base), cap].min
+      end
+
+      # Parses the Retry-After header (delay in seconds form only).
+      # Capped to http_retry_max_delay to keep waits bounded.
+      # @return [Float, nil] seconds to wait, or nil if absent/unparseable
+      def parse_retry_after(response)
+        headers = response.headers || {}
+        value = headers['Retry-After'] || headers['retry-after']
+        return nil unless value.to_s.strip.match?(/\A\d+\z/)
+
+        [value.to_i, Config.http_retry_max_delay].min.to_f
+      end
+
+      # Extracted for testability (stubbed in specs to avoid real sleeping).
+      def wait(seconds)
+        sleep(seconds)
+      end
+
       private
 
       def request(method, url, body: nil, headers: {}, timeout: nil)
         options = build_options(body, headers, timeout)
+        max_attempts = Config.http_retry_max_attempts
+        attempt = 0
 
-        response = Typhoeus::Request.new(url, options.merge(method: method)).run
+        loop do
+          response = Typhoeus::Request.new(url, options.merge(method: method)).run
+          log_request(method, url, response)
 
-        log_request(method, url, response)
-        response
+          return response unless retryable?(response) && attempt < max_attempts
+
+          delay = retry_delay(response, attempt)
+          ScopesExtractor.logger.warn(
+            "#{method.to_s.upcase} #{url} → #{response.code}, retrying in #{delay.round(1)}s " \
+            "(attempt #{attempt + 1}/#{max_attempts})"
+          )
+          wait(delay)
+          attempt += 1
+        end
       end
 
       def build_options(body, headers, timeout)
