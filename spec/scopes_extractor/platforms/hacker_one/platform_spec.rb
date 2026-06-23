@@ -188,9 +188,14 @@ RSpec.describe ScopesExtractor::Platforms::HackerOne::Platform do
         platform.fetch_programs
       end
 
-      it 'returns empty array' do
+      it 'keeps the program flagged as fetch_failed instead of dropping it' do
         programs = platform.fetch_programs
-        expect(programs).to be_empty
+
+        expect(programs.size).to eq(1)
+        program = programs.first
+        expect(program.slug).to eq('test-program')
+        expect(program.fetch_failed?).to be true
+        expect(program.scopes).to be_empty
       end
     end
 

@@ -13,6 +13,14 @@ module ScopesExtractor
       attribute :name, Types::String
       attribute :bounty, Types::Bool
       attribute :scopes, Types::Array.of(Scope).default([].freeze)
+      # Transient sync-cycle flag: set when the platform listed the program but
+      # could not fetch its details (rate limit, timeout, ...). Such a program
+      # must not be treated as removed nor have its scopes wiped.
+      attribute :fetch_failed, Types::Bool.default(false)
+
+      def fetch_failed?
+        fetch_failed
+      end
 
       def in_scopes
         scopes.select(&:is_in_scope)

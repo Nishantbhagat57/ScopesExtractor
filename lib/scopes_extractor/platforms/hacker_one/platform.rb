@@ -81,12 +81,28 @@ module ScopesExtractor
             rescue StandardError => e
               ScopesExtractor.logger.error "[HackerOne] Failed to fetch/parse program #{handle}: #{e.message}"
               ScopesExtractor.logger.debug e.backtrace.join("\n")
-              nil
+              # Keep the program (flagged) so a transient failure is not mistaken
+              # for a removal; its existing scopes are preserved downstream.
+              build_failed_program(raw)
             end
           end
         end
 
         private
+
+        # Builds a program from listing data only, flagged as fetch-failed so
+        # the diff engine preserves it and its scopes for this cycle.
+        def build_failed_program(raw)
+          attr = raw['attributes']
+
+          Models::Program.new(
+            slug: attr['handle'],
+            platform: 'hackerone',
+            name: attr['name'],
+            bounty: attr['offers_bounties'] == true,
+            fetch_failed: true
+          )
+        end
 
         def parse_program(raw, scopes_data)
           attr = raw['attributes']

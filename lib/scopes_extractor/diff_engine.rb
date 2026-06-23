@@ -16,6 +16,10 @@ module ScopesExtractor
 
       is_new_program = existing_program.nil?
 
+      # When the platform listed the program but failed to fetch its details,
+      # keep the existing scopes untouched and skip a half-known new program.
+      return preserve_failed_program(platform_name, existing_program, fetched_program) if fetched_program.fetch_failed?
+
       if is_new_program
         program_id = insert_new_program(platform_name, fetched_program)
       else
@@ -81,6 +85,16 @@ module ScopesExtractor
     end
 
     private
+
+    # Preserves a program whose details could not be fetched this cycle.
+    # Absence of fresh data is not a removal: an existing program keeps its
+    # scopes (only metadata from the listing is refreshed) and a brand-new
+    # program is left unregistered until a successful fetch.
+    def preserve_failed_program(platform_name, existing_program, fetched_program)
+      update_program_if_changed(existing_program[:id], existing_program, fetched_program) unless existing_program.nil?
+      ScopesExtractor.logger.debug "[#{platform_name}] Preserving #{fetched_program.slug}: detail fetch failed"
+      nil
+    end
 
     def insert_new_program(platform_name, fetched_program)
       @db[:programs].insert(
