@@ -241,6 +241,78 @@ RSpec.describe ScopesExtractor::DiffEngine do
     end
   end
 
+  describe '#process_program when fetch failed' do
+    context 'when the program already exists' do
+      before do
+        program_id = ScopesExtractor.db[:programs].insert(
+          slug: 'existing-program',
+          platform: 'hackerone',
+          name: 'Old Name',
+          bounty: false,
+          last_updated: Time.now
+        )
+        ScopesExtractor.db[:scopes].insert(
+          program_id: program_id,
+          value: 'kept.example.com',
+          type: 'web',
+          is_in_scope: true,
+          created_at: Time.now
+        )
+      end
+
+      let(:failed_program) do
+        ScopesExtractor::Models::Program.new(
+          slug: 'existing-program',
+          platform: 'hackerone',
+          name: 'New Name',
+          bounty: true,
+          scopes: [],
+          fetch_failed: true
+        )
+      end
+
+      it 'preserves the existing scopes (does not wipe them)' do
+        diff_engine.process_program('hackerone', failed_program)
+
+        scopes = ScopesExtractor.db[:scopes].all
+        expect(scopes.map { |s| s[:value] }).to contain_exactly('kept.example.com')
+      end
+
+      it 'does not emit removed-scope notifications' do
+        expect(notifier).not_to receive(:notify_removed_scope)
+        diff_engine.process_program('hackerone', failed_program)
+      end
+
+      it 'still updates the program metadata from the listing' do
+        diff_engine.process_program('hackerone', failed_program)
+
+        db_program = ScopesExtractor.db[:programs].where(slug: 'existing-program').first
+        expect(db_program[:name]).to eq('New Name')
+        expect(db_program[:bounty]).to be true
+      end
+    end
+
+    context 'when the program is brand new' do
+      let(:failed_program) do
+        ScopesExtractor::Models::Program.new(
+          slug: 'new-program',
+          platform: 'hackerone',
+          name: 'New Program',
+          bounty: true,
+          scopes: [],
+          fetch_failed: true
+        )
+      end
+
+      it 'does not register the half-known program' do
+        expect(notifier).not_to receive(:notify_new_program)
+        diff_engine.process_program('hackerone', failed_program)
+
+        expect(ScopesExtractor.db[:programs].where(slug: 'new-program').first).to be_nil
+      end
+    end
+  end
+
   describe '#process_removed_programs' do
     before do
       ScopesExtractor.db[:programs].insert(

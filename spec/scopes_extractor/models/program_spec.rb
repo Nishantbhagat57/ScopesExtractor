@@ -53,6 +53,31 @@ RSpec.describe ScopesExtractor::Models::Program do
 
       expect(program.scopes).to eq([])
     end
+
+    it 'defaults fetch_failed to false' do
+      program = described_class.new(
+        slug: 'test-program',
+        platform: 'hackerone',
+        name: 'Test Program',
+        bounty: true
+      )
+
+      expect(program.fetch_failed?).to be false
+    end
+  end
+
+  describe '#fetch_failed?' do
+    it 'returns true when the program is flagged' do
+      program = described_class.new(
+        slug: 'test-program',
+        platform: 'hackerone',
+        name: 'Test Program',
+        bounty: true,
+        fetch_failed: true
+      )
+
+      expect(program.fetch_failed?).to be true
+    end
   end
 
   describe '#in_scopes' do
