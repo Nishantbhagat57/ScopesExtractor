@@ -7,7 +7,8 @@ module ScopesExtractor
         database_path = resolve_database_path
         ensure_db_directory(database_path)
 
-        ScopesExtractor.db = Sequel.sqlite(database_path)
+        ScopesExtractor.db = Sequel.sqlite(database_path, timeout: 10_000)
+        configure_concurrency(ScopesExtractor.db)
         ScopesExtractor.logger.info "Connected to database: #{database_path}".green
 
         ScopesExtractor.db
@@ -49,6 +50,11 @@ module ScopesExtractor
       end
 
       private
+
+      def configure_concurrency(db)
+        db.run('PRAGMA journal_mode = WAL')
+        db.run('PRAGMA synchronous = NORMAL')
+      end
 
       def resolve_database_path
         path = Config.database_path
