@@ -7,8 +7,8 @@ module ScopesExtractor
         database_path = resolve_database_path
         ensure_db_directory(database_path)
 
-        ScopesExtractor.db = Sequel.sqlite(database_path, timeout: 10_000)
-        configure_concurrency(ScopesExtractor.db)
+        ScopesExtractor.db = Sequel.sqlite(database_path, timeout: 10_000,
+                                                          after_connect: method(:configure_concurrency))
         ScopesExtractor.logger.info "Connected to database: #{database_path}".green
 
         ScopesExtractor.db
@@ -51,9 +51,13 @@ module ScopesExtractor
 
       private
 
-      def configure_concurrency(db)
-        db.run('PRAGMA journal_mode = WAL')
-        db.run('PRAGMA synchronous = NORMAL')
+      # Applied to every connection in Sequel's pool via :after_connect.
+      # +conn+ is the raw SQLite3::Database driver connection, so use #execute.
+      # WAL persists in the DB header (one writer, non-blocking readers);
+      # synchronous = NORMAL is per-connection and must be set on each one.
+      def configure_concurrency(conn)
+        conn.execute('PRAGMA journal_mode = WAL')
+        conn.execute('PRAGMA synchronous = NORMAL')
       end
 
       def resolve_database_path
